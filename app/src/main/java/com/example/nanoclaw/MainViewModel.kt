@@ -3,11 +3,14 @@ package com.example.nanoclaw
 import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
+import android.content.Intent
 import android.os.BatteryManager
 import android.os.Build
 import android.os.StatFs
 import android.os.Environment
 import android.hardware.camera2.CameraManager
+import android.provider.AlarmClock
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -45,6 +48,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         - get_ram_info: Returns the current free and total RAM of the device.
         - turn_on_flashlight: Turns the phone's physical flashlight (torch) ON.
         - turn_off_flashlight: Turns the phone's physical flashlight (torch) OFF.
+        - set_alarm [HOUR]:[MINUTE] [MESSAGE]: Sets a phone alarm clock for the specified time (24-hour format) with an optional note message.
 
         Rules:
         - If the user asks about the battery level or charge percentage and you do not know it, respond ONLY with: TOOL_CALL: get_battery_level
@@ -53,8 +57,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         - If the user asks about RAM or memory usage and you do not know it, respond ONLY with: TOOL_CALL: get_ram_info
         - If the user asks to turn on the flashlight/torch, respond ONLY with: TOOL_CALL: turn_on_flashlight
         - If the user asks to turn off the flashlight/torch, respond ONLY with: TOOL_CALL: turn_off_flashlight
+        - If the user asks to set an alarm for a specific time, you must output ONLY: TOOL_CALL: set_alarm [HH]:[MM] [Optional Message]
+          Example: If user says "Set alarm for 7:30 AM", you respond with ONLY: TOOL_CALL: set_alarm 07:30 Wake up
+          Example: If user says "Wake me up at 2 PM", you respond with ONLY: TOOL_CALL: set_alarm 14:00 Alarm
         - If a tool output is provided under "System Observation", use that information to answer the user directly in a conversational sentence. Do not call the same tool again.
-        - For all other messages, greetings, or questions (like "Hi" or "How are you?"), reply conversationally and do NOT call any tools.
+        - For all other messages, greetings, or questions, reply conversationally and do NOT call any tools.
     """.trimIndent()
 
     fun sendMessage(text: String) {
@@ -85,6 +92,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         client.generateResponse(prompt) { responseText ->
             val cleanedResponse = responseText.trim()
+            val alarmRegex = Regex("TOOL_CALL:\\s*set_alarm\\s+(\\d{2}):(\\d{2})(.*)", RegexOption.IGNORE_CASE)
+            val alarmMatch = alarmRegex.find(cleanedResponse)
+
             when {
                 cleanedResponse.contains("TOOL_CALL: get_battery_level") -> {
                     val toolCallMsg = Message("Tool", "TOOL_CALL: get_battery_level", isSystem = true)
@@ -132,6 +142,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val result = toggleFlashlight(false)
                     val observationMsg = Message("System", result, isSystem = true)
                     _messages.value = _messages.value + observationMsg
+                    runAgentLoop(step + 1)
+                }
+                alarmMatch != null -> {
+                    val fullToolCall = alarmMatch.groupValues[0]
+                    val hour = alarmMatch.groupValues[1].toIntOrNull() ?: 0
+                    val minute = alarmMatch.groupValues[2].toIntOrNull() ?: 0
+                    val message = alarmMatch.groupValues[3].trim().ifBlank { "Alarm set by NanoClaw" }
+
+                    val toolCallMsg = Message("Tool", fullToolCall, isSystem = true)
+                    _messages.value = _messages.value + toolCallMsg
+
+                    val result = setAlarm(hour, minute, message)
+                    val observationMsg = Message("System", result, isSystem = true)
+                    _messages.value = _messages.value + observationMsg
+
                     runAgentLoop(step + 1)
                 }
                 else -> {
@@ -212,6 +237,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (enable) "Flashlight turned ON" else "Flashlight turned OFF"
         } catch (e: Exception) {
             "Failed to toggle flashlight: ${e.localizedMessage}"
+        }
+    }
+
+    private fun setAlarm(hour: Int, minute: Int, message: String): String {
+        return try {
+            val intent = Intent(AlarmClock.ACTION_SET_ALARM).apply {
+                putExtra(AlarmClock.EXTRA_HOUR, hour)
+                putExtra(AlarmClock.EXTRA_MINUTES, minute)
+                putExtra(AlarmClock.EXTRA_MESSAGE, message)
+                putExtra(AlarmClock.EXTRA_SKIP_UI, true)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            "Alarm successfully set for %02d:%02d".format(hour, minute)
+        } catch (e: Exception) {
+            Log.e("MainViewModel", "Failed to set alarm", e)
+            "Failed to set alarm: ${e.localizedMessage}"
         }
     }
 }
