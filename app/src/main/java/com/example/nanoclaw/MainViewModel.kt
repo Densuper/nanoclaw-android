@@ -29,19 +29,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // Safety limit to prevent infinite tool calling loops
     private val MAX_STEPS = 3
-
     private val systemPrompt = """
-        You are NanoClaw, a helpful local AI assistant running on this Android device.
-        You have access to the following tool:
-        - get_battery_level: Returns the current battery level percentage of the device.
+        You are NanoClaw, a helpful local AI assistant. 
+        You have access to the tool: get_battery_level (returns the battery level percentage).
 
-        Instructions:
-        1. If the user asks about the battery, power, or charge status, and you DO NOT have the battery level information yet in the conversation history, you MUST output exactly:
-        TOOL_CALL: get_battery_level
-        Do not output any other text or explanations.
-        2. If you see "System Observation: Battery level is [X]%", do NOT call the tool again. Instead, answer the user's question directly in a natural sentence (e.g., "Your battery is currently at 87%.").
+        Rules:
+        - If the user asks about the battery level or charge percentage and you do not know it, respond ONLY with: TOOL_CALL: get_battery_level
+        - If you see "System Observation: Battery level is [X]%", use it to answer the user directly in a conversational sentence.
+        - For all other messages, greetings, or questions (like "Hi" or "How are you?"), reply conversationally and do NOT call any tools.
     """.trimIndent()
-
     fun sendMessage(text: String) {
         if (text.isBlank()) return
 
