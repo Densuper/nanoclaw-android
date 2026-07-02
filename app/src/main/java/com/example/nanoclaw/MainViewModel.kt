@@ -124,8 +124,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         - If the user asks to set an alarm for a specific time, you must output ONLY: TOOL_CALL: set_alarm [HH]:[MM] [Optional Message]
           Example: If user says "Set alarm for 7:30 AM", you respond with ONLY: TOOL_CALL: set_alarm 07:30 Wake up
         - If the user asks a question requiring real-time internet information, news, current facts, or search lookups, you must output ONLY: TOOL_CALL: web_search [QUERY]
-          Example: If user says "Who is the president of France?", you respond with ONLY: TOOL_CALL: web_search president of France
-          Example: If user says "What is the capital of Japan?", you respond with ONLY: TOOL_CALL: web_search capital of Japan
         - If a tool output is provided under "System Observation", use that information to answer the user directly in a conversational sentence. Do not call the same tool again.
         - For all other messages, greetings, or questions, reply conversationally and do NOT call any tools.
     """.trimIndent()
@@ -142,8 +140,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         updateMessagesAndSave(_messages.value + userMessage)
         _isLoading.value = true
 
-        // Start execution loop
-        runAgentLoop(step = 0)
+        val lowerText = text.lowercase()
+
+        // NanoClaw Reflex Layer (Bypassing direct LLM refusal for obvious tool tasks)
+        when {
+            // Weather reflex (Go search weather first, then feed context to Gemini)
+            lowerText.contains("weather") || lowerText.contains("temperature") || lowerText.contains("forecast") -> {
+                val toolCallMsg = Message("Tool", "TOOL_CALL: web_search $text", isSystem = true)
+                _messages.value = _messages.value + toolCallMsg
+
+                ioScope.launch {
+                    val searchResult = performWebSearch(text)
+                    val observationMsg = Message("System", "Web Search result: $searchResult", isSystem = true)
+                    
+                    withContext(Dispatchers.Main) {
+                        updateMessagesAndSave(_messages.value + observationMsg)
+                        // Run agent loop starting at step 1 since we already fetched the tool output
+                        runAgentLoop(step = 1)
+                    }
+                }
+            }
+            // Flashlight reflex (Execute action first, then let Gemini reply)
+            lowerText.contains("flashlight") || lowerText.contains("torch") -> {
+                val turnOn = lowerText.contains("on") || lowerText.contains("enable") || lowerText.contains("start")
+                val action = if (turnOn) "turn_on_flashlight" else "turn_off_flashlight"
+                val toolCallMsg = Message("Tool", "TOOL_CALL: $action", isSystem = true)
+                
+                val result = toggleFlashlight(turnOn)
+                val observationMsg = Message("System", result, isSystem = true)
+                
+                updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
+                runAgentLoop(step = 1)
+            }
+            // Battery status reflex
+            lowerText.contains("battery") || lowerText.contains("charge") || lowerText.contains("power") -> {
+                val toolCallMsg = Message("Tool", "TOOL_CALL: get_battery_level", isSystem = true)
+                val batteryLevel = getBatteryStatus()
+                val observationMsg = Message("System", "Battery level is $batteryLevel%", isSystem = true)
+                
+                updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
+                runAgentLoop(step = 1)
+            }
+            // Default: Let the brain reason on step 0
+            else -> {
+                runAgentLoop(step = 0)
+            }
+        }
     }
 
     private fun runAgentLoop(step: Int) {
