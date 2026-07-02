@@ -26,19 +26,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
-
     private val systemPrompt = """
         You are NanoClaw, a helpful local AI assistant running on this Android device.
         You have access to the following tool:
         - get_battery_level: Returns the current battery level percentage of the device.
 
         Instructions:
-        1. If the user asks about battery level, power status, or charge percentage, you must output exactly:
+        1. If the user asks about the battery, power, or charge status, and you DO NOT have the battery level information yet in the conversation history, you MUST output exactly:
         TOOL_CALL: get_battery_level
-        Do not say anything else. Do not explain.
-        2. If you receive a "System Observation" containing the battery level, use that information to answer the user's question.
+        Do not output any other text or explanations.
+        2. If you see "System Observation: Battery level is [X]%", do NOT call the tool again. Instead, answer the user's question directly in a natural sentence (e.g., "Your battery is currently at 87%.").
     """.trimIndent()
-
     fun sendMessage(text: String) {
         if (text.isBlank()) return
 
