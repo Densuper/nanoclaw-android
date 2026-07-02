@@ -12,10 +12,20 @@ import android.hardware.camera2.CameraManager
 import android.provider.AlarmClock
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.BufferedReader
 import java.io.File
+import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+import java.net.URLEncoder
 
 data class Message(
     val sender: String,
@@ -23,14 +33,67 @@ data class Message(
     val isSystem: Boolean = false
 )
 
+object MemoryManager {
+    private fun getMemoryFile(): File {
+        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val appDir = File(downloadsDir, "NanoClaw")
+        if (!appDir.exists()) {
+            appDir.mkdirs()
+        }
+        return File(appDir, "memory.txt")
+    }
+
+    fun saveMemory(messages: List<Message>) {
+        try {
+            val file = getMemoryFile()
+            val sb = StringBuilder()
+            for (msg in messages) {
+                // Serialize as SENDER|||TEXT|||IS_SYSTEM
+                sb.append(msg.sender).append("|||")
+                  .append(msg.text).append("|||")
+                  .append(msg.isSystem).append("\n")
+            }
+            file.writeText(sb.toString())
+        } catch (e: Exception) {
+            Log.e("MemoryManager", "Failed to save memory to public Download/NanoClaw/memory.txt", e)
+        }
+    }
+
+    fun loadMemory(): List<Message> {
+        val list = mutableListOf<Message>()
+        try {
+            val file = getMemoryFile()
+            if (file.exists()) {
+                val lines = file.readLines()
+                for (line in lines) {
+                    val parts = line.split("|||")
+                    if (parts.size >= 3) {
+                        val sender = parts[0]
+                        val text = parts[1]
+                        val isSystem = parts[2].toBoolean()
+                        list.add(Message(sender, text, isSystem))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("MemoryManager", "Failed to load memory from public Download/NanoClaw/memory.txt", e)
+        }
+        // If file doesn't exist or is empty, return a default initialization message
+        if (list.isEmpty()) {
+            list.add(Message("System", "NanoClaw Local Agent initialized. Local Gemini Nano connection active.", isSystem = true))
+        }
+        return list
+    }
+}
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val client = GeminiNanoClient(application.applicationContext)
     private val context = application.applicationContext
+    private val ioScope = CoroutineScope(Dispatchers.IO)
 
-    private val _messages = MutableStateFlow<List<Message>>(
-        listOf(Message("System", "NanoClaw Local Agent initialized. Local Gemini Nano connection active.", isSystem = true))
-    )
+    // Load initial messages from long-term memory
+    private val _messages = MutableStateFlow<List<Message>>(MemoryManager.loadMemory())
     val messages: StateFlow<List<Message>> = _messages.asStateFlow()
 
     private val _isLoading = MutableStateFlow(false)
@@ -49,6 +112,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         - turn_on_flashlight: Turns the phone's physical flashlight (torch) ON.
         - turn_off_flashlight: Turns the phone's physical flashlight (torch) OFF.
         - set_alarm [HOUR]:[MINUTE] [MESSAGE]: Sets a phone alarm clock for the specified time (24-hour format) with an optional note message.
+        - web_search [QUERY]: Searches the web for information using a search engine query string.
 
         Rules:
         - If the user asks about the battery level or charge percentage and you do not know it, respond ONLY with: TOOL_CALL: get_battery_level
@@ -59,16 +123,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         - If the user asks to turn off the flashlight/torch, respond ONLY with: TOOL_CALL: turn_off_flashlight
         - If the user asks to set an alarm for a specific time, you must output ONLY: TOOL_CALL: set_alarm [HH]:[MM] [Optional Message]
           Example: If user says "Set alarm for 7:30 AM", you respond with ONLY: TOOL_CALL: set_alarm 07:30 Wake up
-          Example: If user says "Wake me up at 2 PM", you respond with ONLY: TOOL_CALL: set_alarm 14:00 Alarm
+        - If the user asks a question requiring real-time internet information, news, current facts, or search lookups, you must output ONLY: TOOL_CALL: web_search [QUERY]
+          Example: If user says "Who is the president of France?", you respond with ONLY: TOOL_CALL: web_search president of France
+          Example: If user says "What is the capital of Japan?", you respond with ONLY: TOOL_CALL: web_search capital of Japan
         - If a tool output is provided under "System Observation", use that information to answer the user directly in a conversational sentence. Do not call the same tool again.
         - For all other messages, greetings, or questions, reply conversationally and do NOT call any tools.
     """.trimIndent()
+
+    private fun updateMessagesAndSave(newMessagesList: List<Message>) {
+        _messages.value = newMessagesList
+        MemoryManager.saveMemory(newMessagesList)
+    }
 
     fun sendMessage(text: String) {
         if (text.isBlank()) return
 
         val userMessage = Message("You", text)
-        _messages.value = _messages.value + userMessage
+        updateMessagesAndSave(_messages.value + userMessage)
         _isLoading.value = true
 
         // Start execution loop
@@ -83,7 +154,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 text = "⚠️ Warning: Agent exceeded maximum loop steps ($MAX_STEPS). Terminating loop to save battery and prevent quota overuse.",
                 isSystem = true
             )
-            _messages.value = _messages.value + limitWarning
+            updateMessagesAndSave(_messages.value + limitWarning)
             _isLoading.value = false
             return
         }
@@ -95,53 +166,56 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val alarmRegex = Regex("TOOL_CALL:\\s*set_alarm\\s+(\\d{2}):(\\d{2})(.*)", RegexOption.IGNORE_CASE)
             val alarmMatch = alarmRegex.find(cleanedResponse)
 
+            val searchRegex = Regex("TOOL_CALL:\\s*web_search\\s+(.*)", RegexOption.IGNORE_CASE)
+            val searchMatch = searchRegex.find(cleanedResponse)
+
             when {
                 cleanedResponse.contains("TOOL_CALL: get_battery_level") -> {
                     val toolCallMsg = Message("Tool", "TOOL_CALL: get_battery_level", isSystem = true)
-                    _messages.value = _messages.value + toolCallMsg
                     val batteryLevel = getBatteryStatus()
                     val observationMsg = Message("System", "Battery level is $batteryLevel%", isSystem = true)
-                    _messages.value = _messages.value + observationMsg
+                    
+                    updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
                     runAgentLoop(step + 1)
                 }
                 cleanedResponse.contains("TOOL_CALL: get_storage_info") -> {
                     val toolCallMsg = Message("Tool", "TOOL_CALL: get_storage_info", isSystem = true)
-                    _messages.value = _messages.value + toolCallMsg
                     val storageInfo = getStorageStatus()
                     val observationMsg = Message("System", "Available storage is $storageInfo", isSystem = true)
-                    _messages.value = _messages.value + observationMsg
+                    
+                    updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
                     runAgentLoop(step + 1)
                 }
                 cleanedResponse.contains("TOOL_CALL: get_device_info") -> {
                     val toolCallMsg = Message("Tool", "TOOL_CALL: get_device_info", isSystem = true)
-                    _messages.value = _messages.value + toolCallMsg
                     val deviceInfo = getDeviceInfo()
                     val observationMsg = Message("System", "Device info is: $deviceInfo", isSystem = true)
-                    _messages.value = _messages.value + observationMsg
+                    
+                    updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
                     runAgentLoop(step + 1)
                 }
                 cleanedResponse.contains("TOOL_CALL: get_ram_info") -> {
                     val toolCallMsg = Message("Tool", "TOOL_CALL: get_ram_info", isSystem = true)
-                    _messages.value = _messages.value + toolCallMsg
                     val ramInfo = getRamStatus()
                     val observationMsg = Message("System", "RAM usage details: $ramInfo", isSystem = true)
-                    _messages.value = _messages.value + observationMsg
+                    
+                    updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
                     runAgentLoop(step + 1)
                 }
                 cleanedResponse.contains("TOOL_CALL: turn_on_flashlight") -> {
                     val toolCallMsg = Message("Tool", "TOOL_CALL: turn_on_flashlight", isSystem = true)
-                    _messages.value = _messages.value + toolCallMsg
                     val result = toggleFlashlight(true)
                     val observationMsg = Message("System", result, isSystem = true)
-                    _messages.value = _messages.value + observationMsg
+                    
+                    updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
                     runAgentLoop(step + 1)
                 }
                 cleanedResponse.contains("TOOL_CALL: turn_off_flashlight") -> {
                     val toolCallMsg = Message("Tool", "TOOL_CALL: turn_off_flashlight", isSystem = true)
-                    _messages.value = _messages.value + toolCallMsg
                     val result = toggleFlashlight(false)
                     val observationMsg = Message("System", result, isSystem = true)
-                    _messages.value = _messages.value + observationMsg
+                    
+                    updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
                     runAgentLoop(step + 1)
                 }
                 alarmMatch != null -> {
@@ -151,17 +225,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val message = alarmMatch.groupValues[3].trim().ifBlank { "Alarm set by NanoClaw" }
 
                     val toolCallMsg = Message("Tool", fullToolCall, isSystem = true)
-                    _messages.value = _messages.value + toolCallMsg
-
                     val result = setAlarm(hour, minute, message)
                     val observationMsg = Message("System", result, isSystem = true)
-                    _messages.value = _messages.value + observationMsg
-
+                    
+                    updateMessagesAndSave(_messages.value + toolCallMsg + observationMsg)
                     runAgentLoop(step + 1)
+                }
+                searchMatch != null -> {
+                    val fullToolCall = searchMatch.groupValues[0]
+                    val searchQuery = searchMatch.groupValues[1].trim()
+
+                    val toolCallMsg = Message("Tool", fullToolCall, isSystem = true)
+                    _messages.value = _messages.value + toolCallMsg
+
+                    ioScope.launch {
+                        val searchResult = performWebSearch(searchQuery)
+                        val observationMsg = Message("System", "Web Search result: $searchResult", isSystem = true)
+                        
+                        withContext(Dispatchers.Main) {
+                            updateMessagesAndSave(_messages.value + observationMsg)
+                            runAgentLoop(step + 1)
+                        }
+                    }
                 }
                 else -> {
                     // Final conversational answer
-                    _messages.value = _messages.value + Message("NanoClaw", responseText)
+                    updateMessagesAndSave(_messages.value + Message("NanoClaw", responseText))
                     _isLoading.value = false
                 }
             }
@@ -254,6 +343,46 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             Log.e("MainViewModel", "Failed to set alarm", e)
             "Failed to set alarm: ${e.localizedMessage}"
+        }
+    }
+
+    private fun performWebSearch(query: String): String {
+        return try {
+            val encodedQuery = URLEncoder.encode(query, "UTF-8")
+            val url = URL("https://api.duckduckgo.com/?q=$encodedQuery&format=json&no_html=1&skip_disambig=1")
+            val conn = url.openConnection() as HttpURLConnection
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 6000
+            conn.readTimeout = 6000
+
+            if (conn.responseCode == 200) {
+                val reader = BufferedReader(InputStreamReader(conn.inputStream))
+                val sb = StringBuilder()
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    sb.append(line)
+                }
+                reader.close()
+
+                val json = JSONObject(sb.toString())
+                val abstractText = json.optString("AbstractText", "")
+                if (abstractText.isNotBlank()) {
+                    abstractText
+                } else {
+                    val relatedTopics = json.optJSONArray("RelatedTopics")
+                    if (relatedTopics != null && relatedTopics.length() > 0) {
+                        val firstTopic = relatedTopics.getJSONObject(0)
+                        firstTopic.optString("Text", "No search results found.")
+                    } else {
+                        "No instant search results found on DuckDuckGo."
+                    }
+                }
+            } else {
+                "Error contacting search server (HTTP ${conn.responseCode})"
+            }
+        } catch (e: Exception) {
+            Log.e("MainViewModel", "Web search failed", e)
+            "Web search failed: ${e.localizedMessage}"
         }
     }
 }
