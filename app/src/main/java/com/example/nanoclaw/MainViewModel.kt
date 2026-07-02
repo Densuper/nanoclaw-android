@@ -3,10 +3,14 @@ package com.example.nanoclaw
 import android.app.Application
 import android.content.Context
 import android.os.BatteryManager
+import android.os.Build
+import android.os.StatFs
+import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.File
 
 data class Message(
     val sender: String,
@@ -29,15 +33,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     // Safety limit to prevent infinite tool calling loops
     private val MAX_STEPS = 3
+
     private val systemPrompt = """
         You are NanoClaw, a helpful local AI assistant. 
-        You have access to the tool: get_battery_level (returns the battery level percentage).
+        You have access to the following tools:
+        - get_battery_level: Returns the battery level percentage of the device.
+        - get_storage_info: Returns the free/available storage space on the device.
+        - get_device_info: Returns the device model, manufacturer name, and Android version.
 
         Rules:
         - If the user asks about the battery level or charge percentage and you do not know it, respond ONLY with: TOOL_CALL: get_battery_level
-        - If you see "System Observation: Battery level is [X]%", use it to answer the user directly in a conversational sentence.
+        - If the user asks about storage space, disk space, or memory space and you do not know it, respond ONLY with: TOOL_CALL: get_storage_info
+        - If the user asks about the phone model, brand, manufacturer, or OS/Android version and you do not know it, respond ONLY with: TOOL_CALL: get_device_info
+        - If a tool output is provided under "System Observation", use that information to answer the user directly in a conversational sentence. Do not call the same tool again.
         - For all other messages, greetings, or questions (like "Hi" or "How are you?"), reply conversationally and do NOT call any tools.
     """.trimIndent()
+
     fun sendMessage(text: String) {
         if (text.isBlank()) return
 
@@ -66,22 +77,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         client.generateResponse(prompt) { responseText ->
             val cleanedResponse = responseText.trim()
-            if (cleanedResponse.contains("TOOL_CALL: get_battery_level")) {
-                // Add the tool invocation log to memory (mapped to Model: TOOL_CALL: get_battery_level)
-                val toolCallMsg = Message("Tool", "TOOL_CALL: get_battery_level", isSystem = true)
-                _messages.value = _messages.value + toolCallMsg
+            when {
+                cleanedResponse.contains("TOOL_CALL: get_battery_level") -> {
+                    // Tool call log
+                    val toolCallMsg = Message("Tool", "TOOL_CALL: get_battery_level", isSystem = true)
+                    _messages.value = _messages.value + toolCallMsg
 
-                // Query and log the real output
-                val batteryLevel = getBatteryStatus()
-                val observationMsg = Message("System", "Battery level is $batteryLevel%", isSystem = true)
-                _messages.value = _messages.value + observationMsg
+                    // Query real battery
+                    val batteryLevel = getBatteryStatus()
+                    val observationMsg = Message("System", "Battery level is $batteryLevel%", isSystem = true)
+                    _messages.value = _messages.value + observationMsg
 
-                // Recurse to next step in the loop
-                runAgentLoop(step + 1)
-            } else {
-                // Final conversational answer
-                _messages.value = _messages.value + Message("NanoClaw", responseText)
-                _isLoading.value = false
+                    // Next step
+                    runAgentLoop(step + 1)
+                }
+                cleanedResponse.contains("TOOL_CALL: get_storage_info") -> {
+                    // Tool call log
+                    val toolCallMsg = Message("Tool", "TOOL_CALL: get_storage_info", isSystem = true)
+                    _messages.value = _messages.value + toolCallMsg
+
+                    // Query real storage
+                    val storageInfo = getStorageStatus()
+                    val observationMsg = Message("System", "Available storage is $storageInfo", isSystem = true)
+                    _messages.value = _messages.value + observationMsg
+
+                    // Next step
+                    runAgentLoop(step + 1)
+                }
+                cleanedResponse.contains("TOOL_CALL: get_device_info") -> {
+                    // Tool call log
+                    val toolCallMsg = Message("Tool", "TOOL_CALL: get_device_info", isSystem = true)
+                    _messages.value = _messages.value + toolCallMsg
+
+                    // Query real device info
+                    val deviceInfo = getDeviceInfo()
+                    val observationMsg = Message("System", "Device info is: $deviceInfo", isSystem = true)
+                    _messages.value = _messages.value + observationMsg
+
+                    // Next step
+                    runAgentLoop(step + 1)
+                }
+                else -> {
+                    // Final conversational answer
+                    _messages.value = _messages.value + Message("NanoClaw", responseText)
+                    _isLoading.value = false
+                }
             }
         }
     }
@@ -114,5 +154,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } catch (e: Exception) {
             -1
         }
+    }
+
+    private fun getStorageStatus(): String {
+        return try {
+            val path: File = Environment.getDataDirectory()
+            val stat = StatFs(path.path)
+            val blockSize = stat.blockSizeLong
+            val availableBlocks = stat.availableBlocksLong
+            val freeBytes = availableBlocks * blockSize
+            val freeGB = freeBytes / (1024.0 * 1024.0 * 1024.0)
+            String.format("%.2f GB free", freeGB)
+        } catch (e: Exception) {
+            "Unknown"
+        }
+    }
+
+    private fun getDeviceInfo(): String {
+        return "${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})"
     }
 }
