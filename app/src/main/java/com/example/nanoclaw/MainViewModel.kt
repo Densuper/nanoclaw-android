@@ -1,11 +1,13 @@
 package com.example.nanoclaw
 
+import android.app.ActivityManager
 import android.app.Application
 import android.content.Context
 import android.os.BatteryManager
 import android.os.Build
 import android.os.StatFs
 import android.os.Environment
+import android.hardware.camera2.CameraManager
 import androidx.lifecycle.AndroidViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,11 +42,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         - get_battery_level: Returns the battery level percentage of the device.
         - get_storage_info: Returns the free/available storage space on the device.
         - get_device_info: Returns the device model, manufacturer name, and Android version.
+        - get_ram_info: Returns the current free and total RAM of the device.
+        - turn_on_flashlight: Turns the phone's physical flashlight (torch) ON.
+        - turn_off_flashlight: Turns the phone's physical flashlight (torch) OFF.
 
         Rules:
         - If the user asks about the battery level or charge percentage and you do not know it, respond ONLY with: TOOL_CALL: get_battery_level
         - If the user asks about storage space, disk space, or memory space and you do not know it, respond ONLY with: TOOL_CALL: get_storage_info
         - If the user asks about the phone model, brand, manufacturer, or OS/Android version and you do not know it, respond ONLY with: TOOL_CALL: get_device_info
+        - If the user asks about RAM or memory usage and you do not know it, respond ONLY with: TOOL_CALL: get_ram_info
+        - If the user asks to turn on the flashlight/torch, respond ONLY with: TOOL_CALL: turn_on_flashlight
+        - If the user asks to turn off the flashlight/torch, respond ONLY with: TOOL_CALL: turn_off_flashlight
         - If a tool output is provided under "System Observation", use that information to answer the user directly in a conversational sentence. Do not call the same tool again.
         - For all other messages, greetings, or questions (like "Hi" or "How are you?"), reply conversationally and do NOT call any tools.
     """.trimIndent()
@@ -79,42 +87,51 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val cleanedResponse = responseText.trim()
             when {
                 cleanedResponse.contains("TOOL_CALL: get_battery_level") -> {
-                    // Tool call log
                     val toolCallMsg = Message("Tool", "TOOL_CALL: get_battery_level", isSystem = true)
                     _messages.value = _messages.value + toolCallMsg
-
-                    // Query real battery
                     val batteryLevel = getBatteryStatus()
                     val observationMsg = Message("System", "Battery level is $batteryLevel%", isSystem = true)
                     _messages.value = _messages.value + observationMsg
-
-                    // Next step
                     runAgentLoop(step + 1)
                 }
                 cleanedResponse.contains("TOOL_CALL: get_storage_info") -> {
-                    // Tool call log
                     val toolCallMsg = Message("Tool", "TOOL_CALL: get_storage_info", isSystem = true)
                     _messages.value = _messages.value + toolCallMsg
-
-                    // Query real storage
                     val storageInfo = getStorageStatus()
                     val observationMsg = Message("System", "Available storage is $storageInfo", isSystem = true)
                     _messages.value = _messages.value + observationMsg
-
-                    // Next step
                     runAgentLoop(step + 1)
                 }
                 cleanedResponse.contains("TOOL_CALL: get_device_info") -> {
-                    // Tool call log
                     val toolCallMsg = Message("Tool", "TOOL_CALL: get_device_info", isSystem = true)
                     _messages.value = _messages.value + toolCallMsg
-
-                    // Query real device info
                     val deviceInfo = getDeviceInfo()
                     val observationMsg = Message("System", "Device info is: $deviceInfo", isSystem = true)
                     _messages.value = _messages.value + observationMsg
-
-                    // Next step
+                    runAgentLoop(step + 1)
+                }
+                cleanedResponse.contains("TOOL_CALL: get_ram_info") -> {
+                    val toolCallMsg = Message("Tool", "TOOL_CALL: get_ram_info", isSystem = true)
+                    _messages.value = _messages.value + toolCallMsg
+                    val ramInfo = getRamStatus()
+                    val observationMsg = Message("System", "RAM usage details: $ramInfo", isSystem = true)
+                    _messages.value = _messages.value + observationMsg
+                    runAgentLoop(step + 1)
+                }
+                cleanedResponse.contains("TOOL_CALL: turn_on_flashlight") -> {
+                    val toolCallMsg = Message("Tool", "TOOL_CALL: turn_on_flashlight", isSystem = true)
+                    _messages.value = _messages.value + toolCallMsg
+                    val result = toggleFlashlight(true)
+                    val observationMsg = Message("System", result, isSystem = true)
+                    _messages.value = _messages.value + observationMsg
+                    runAgentLoop(step + 1)
+                }
+                cleanedResponse.contains("TOOL_CALL: turn_off_flashlight") -> {
+                    val toolCallMsg = Message("Tool", "TOOL_CALL: turn_off_flashlight", isSystem = true)
+                    _messages.value = _messages.value + toolCallMsg
+                    val result = toggleFlashlight(false)
+                    val observationMsg = Message("System", result, isSystem = true)
+                    _messages.value = _messages.value + observationMsg
                     runAgentLoop(step + 1)
                 }
                 else -> {
@@ -172,5 +189,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun getDeviceInfo(): String {
         return "${Build.MANUFACTURER} ${Build.MODEL} (Android ${Build.VERSION.RELEASE})"
+    }
+
+    private fun getRamStatus(): String {
+        return try {
+            val activityManager = context.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            val memoryInfo = ActivityManager.MemoryInfo()
+            activityManager.getMemoryInfo(memoryInfo)
+            val freeGB = memoryInfo.availMem / (1024.0 * 1024.0 * 1024.0)
+            val totalGB = memoryInfo.totalMem / (1024.0 * 1024.0 * 1024.0)
+            String.format("%.2f GB available / %.2f GB total RAM", freeGB, totalGB)
+        } catch (e: Exception) {
+            "Unknown"
+        }
+    }
+
+    private fun toggleFlashlight(enable: Boolean): String {
+        return try {
+            val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
+            val cameraId = cameraManager.cameraIdList[0]
+            cameraManager.setTorchMode(cameraId, enable)
+            if (enable) "Flashlight turned ON" else "Flashlight turned OFF"
+        } catch (e: Exception) {
+            "Failed to toggle flashlight: ${e.localizedMessage}"
+        }
     }
 }
